@@ -1,8 +1,7 @@
-// Claude Team Web UI: a group chat where several AI accounts work as a team. Zero npm dependencies.
+// Team Agent: a web UI where you chat with a MAIN AI that has tools (files, shell, web) and can
+// delegate work to other AI accounts you add, like a small team. Zero npm dependencies.
 // Account types:
-//   claude    - Claude Code profile. Signed in via the OFFICIAL login (profile folder) or a
-//               long-lived token from `claude setup-token` (works on headless hosts like Koyeb).
-//   openai    - any OpenAI-compatible API (OpenAI, OpenRouter, NVIDIA NIM, Groq, Together, DeepSeek, Ollama...)
+//   openai    - any OpenAI-compatible API (OpenAI, OpenRouter, NVIDIA NIM, Groq, Together, DeepSeek, Gemini, Ollama...)
 //   anthropic - Anthropic Messages API with an API key
 const http = require('http');
 const { spawn } = require('child_process');
@@ -13,134 +12,312 @@ const path = require('path');
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '127.0.0.1';
 const APP_PASSWORD = process.env.APP_PASSWORD || '';
-const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
+const ALLOW_SHELL = process.env.ALLOW_SHELL !== '0';
 const DATA = process.env.DATA_DIR || path.join(__dirname, 'data');
-const PROFILES = path.join(DATA, 'profiles');
 const WORKSPACE = process.env.WORKSPACE || path.join(DATA, 'workspace');
 const STATE_FILE = path.join(DATA, 'state.json');
 const PUBLIC = path.join(__dirname, 'public');
+const MAX_STEPS = 25;
+const TURN_BUDGET_MS = 15 * 60 * 1000;
 
 const isLoopback = ['127.0.0.1', 'localhost', '::1'].includes(HOST);
 if (!isLoopback && !APP_PASSWORD) {
   console.error('Refusing to listen on a public address without APP_PASSWORD. Set APP_PASSWORD and retry.');
   process.exit(1);
 }
-fs.mkdirSync(PROFILES, { recursive: true });
 fs.mkdirSync(WORKSPACE, { recursive: true });
 
-let state = { accounts: [], messages: [] };
-try { state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch (_) {}
-state.accounts = (state.accounts || []).map(a => ({ type: 'claude', ...a })); // upgrade old state
-const save = () => fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), { mode: 0o600 });
+let workspaceWritable = true;
+try { const probe = path.join(WORKSPACE, '.write-test'); fs.writeFileSync(probe, 'ok'); fs.rmSync(probe); }
+catch (e) { workspaceWritable = false; console.error('WARNING: workspace is not writable:', WORKSPACE, e.message); }
 
+let state = { accounts: [], messages: [], mainId: '' };
+try { state = { ...state, ...JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) }; } catch (_) {}
+const TYPES = ['openai', 'anthropic'];
+state.accounts = (state.accounts || []).filter(a => TYPES.includes(a.type)); // drop removed account types
+const save = () => { try { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), { mode: 0o600 }); } catch (_) {} };
 const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || 'agent';
-const TYPES = ['claude', 'openai', 'anthropic'];
 
-// Optional seeding for hosts with no persistent disk (e.g. Koyeb without a volume):
-// ACCOUNTS_JSON='[{"name":"Coder","type":"openai","baseUrl":"https://openrouter.ai/api/v1","model":"...","keyEnv":"OPENROUTER_KEY"}]'
+// Optional seeding for hosts without a persistent disk (e.g. Koyeb with no volume):
+// ACCOUNTS_JSON='[{"name":"Boss","type":"openai","baseUrl":"https://openrouter.ai/api/v1","model":"...","keyEnv":"OPENROUTER_KEY","main":true}]'
 try {
   for (const s of JSON.parse(process.env.ACCOUNTS_JSON || '[]')) {
     const id = slug(s.name || '');
-    if (!s.name || !TYPES.includes(s.type || 'claude') || state.accounts.some(a => a.id === id)) continue;
-    state.accounts.push({ id, type: 'claude', role: '', ...s });
-    fs.mkdirSync(path.join(PROFILES, id), { recursive: true });
+    if (!s.name || !TYPES.includes(s.type) || state.accounts.some(a => a.id === id)) continue;
+    const { main, ...rest } = s;
+    state.accounts.push({ role: '', ...rest, id });
+    if (main) state.mainId = id;
   }
 } catch (e) { console.error('ACCOUNTS_JSON ignored:', e.message); }
+if (!state.accounts.some(a => a.id === state.mainId)) state.mainId = state.accounts[0]?.id || '';
 
 const sessions = new Set();
-const cookieOf = (req) => (req.headers.cookie || '').split(';').map(s => s.trim())
-  .find(s => s.startsWith('sid='))?.slice(4);
+const cookieOf = (req) => (req.headers.cookie || '').split(';').map(s => s.trim()).find(s => s.startsWith('sid='))?.slice(4);
 const json = (res, code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
 const readBody = (req) => new Promise((resolve) => {
-  let b = ''; req.on('data', d => { b += d; if (b.length > 1e6) req.destroy(); });
+  let b = ''; req.on('data', d => { b += d; if (b.length > 5e6) req.destroy(); });
   req.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch (_) { resolve({}); } });
 });
 
-const profileDir = (id) => path.join(PROFILES, id);
 const apiKeyOf = (a) => a.apiKey || (a.keyEnv ? process.env[a.keyEnv] : '') || '';
-const hasCredential = (a) => a.type === 'claude' ? !!(a.oauthToken || (a.keyEnv && process.env[a.keyEnv])) : !!apiKeyOf(a);
 const publicAccount = (a) => ({
   id: a.id, name: a.name, role: a.role, type: a.type, model: a.model || '', baseUrl: a.baseUrl || '',
-  keyEnv: a.keyEnv || '', hasKey: hasCredential(a), dir: a.type === 'claude' ? profileDir(a.id) : '',
+  keyEnv: a.keyEnv || '', noTools: !!a.noTools, hasKey: !!apiKeyOf(a), main: a.id === state.mainId,
 });
-const safeId = (s) => /^[a-z0-9-]{1,40}$/.test(s);
 const cleanUrl = (u) => String(u || '').trim().replace(/\/+$/, '');
+const mainAccount = () => state.accounts.find(a => a.id === state.mainId);
+const findAccount = (q) => { const s = String(q || '').trim().toLowerCase();
+  return state.accounts.find(a => a.id === s || a.name.toLowerCase() === s); };
 
-// ---- agent backends ----
-function runClaude(account, prompt, timeoutMs) {
+// ---------------- workspace (file system) ----------------
+function safePath(p) {
+  const root = fs.realpathSync(WORKSPACE);
+  const full = path.resolve(root, String(p || '.'));
+  if (full !== root && !full.startsWith(root + path.sep)) throw new Error('Path is outside the workspace');
+  let probe = full;
+  while (!fs.existsSync(probe)) probe = path.dirname(probe);
+  const real = fs.realpathSync(probe);
+  if (real !== root && !real.startsWith(root + path.sep)) throw new Error('Path is outside the workspace');
+  return full;
+}
+function listTree(dir, maxDepth, limit) {
+  const out = [];
+  const walk = (d, depth) => {
+    if (depth > maxDepth || out.length >= limit) return;
+    let entries = []; try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch (_) { return; }
+    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (e.name.startsWith('.') || e.name === 'node_modules') continue;
+      const p = path.join(d, e.name);
+      out.push(path.relative(WORKSPACE, p) + (e.isDirectory() ? '/' : ''));
+      if (e.isDirectory()) walk(p, depth + 1);
+    }
+  };
+  walk(dir, 0);
+  return out;
+}
+
+// ---------------- tools ----------------
+const BASE_TOOLS = [
+  { name: 'list_files', description: 'List files and folders in the shared workspace (recursive, 3 levels).',
+    parameters: { type: 'object', properties: { path: { type: 'string', description: 'Folder, default "."' } } } },
+  { name: 'read_file', description: 'Read a text file from the workspace.',
+    parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
+  { name: 'write_file', description: 'Create or overwrite a file. Parent folders are created automatically.',
+    parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } },
+  { name: 'append_file', description: 'Append text to the end of a file (creates it if missing).',
+    parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } },
+  { name: 'replace_in_file', description: 'Replace one exact piece of text in an existing file.',
+    parameters: { type: 'object', properties: { path: { type: 'string' }, old: { type: 'string' }, new: { type: 'string' } }, required: ['path', 'old', 'new'] } },
+  { name: 'move_file', description: 'Move or rename a file or folder.',
+    parameters: { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' } }, required: ['from', 'to'] } },
+  { name: 'delete_file', description: 'Delete a file or folder.',
+    parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
+  { name: 'fetch_url', description: 'Download a web page or API response (GET) and return its text.',
+    parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } },
+  ...(ALLOW_SHELL ? [{ name: 'run_command', description: 'Run a shell command in the workspace folder (install packages, run scripts and tests, git, build). Times out after 2 minutes.',
+    parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } }] : []),
+];
+const DELEGATE_TOOL = { name: 'delegate_task',
+  description: 'Give a task to a teammate AI (by name) and get their report back. Teammates share the same workspace files. Be specific about what to build or check and which files are involved.',
+  parameters: { type: 'object', properties: { agent: { type: 'string', description: 'Teammate name' }, task: { type: 'string' } }, required: ['agent', 'task'] } };
+
+const isMain = (a) => a.id === state.mainId && state.accounts.length > 1;
+const toolsFor = (a) => isMain(a) ? [...BASE_TOOLS, DELEGATE_TOOL] : BASE_TOOLS;
+
+function cleanEnv(extra = {}) {
+  const env = { ...process.env, ...extra };
+  delete env.APP_PASSWORD; delete env.ACCOUNTS_JSON;
+  for (const a of state.accounts) if (a.keyEnv) delete env[a.keyEnv];
+  return env;
+}
+function runShell(command) {
   return new Promise((resolve) => {
-    const args = ['-p', prompt, '--output-format', 'json', '--permission-mode', 'acceptEdits'];
-    const env = { ...process.env, CLAUDE_CONFIG_DIR: profileDir(account.id) };
-    const tok = account.oauthToken || (account.keyEnv ? process.env[account.keyEnv] : '');
-    if (tok) env.CLAUDE_CODE_OAUTH_TOKEN = tok;
-    const child = spawn(CLAUDE_BIN, args, { cwd: WORKSPACE, env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '', err = '';
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
-    child.stdout.on('data', d => (out += d));
-    child.stderr.on('data', d => (err += d));
-    child.on('error', e => { clearTimeout(timer); resolve({ ok: false, text: `Could not start "${CLAUDE_BIN}": ${e.message}. Is Claude Code installed?` }); });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      try {
-        const j = JSON.parse(out);
-        if (j.is_error) return resolve({ ok: false, text: String(j.result || 'Error') });
-        return resolve({ ok: true, text: String(j.result || '').trim() });
-      } catch (_) {
-        resolve({ ok: false, text: (err || out || `exited with code ${code}`).trim().slice(0, 2000) });
-      }
-    });
+    const child = spawn('sh', ['-c', command], { cwd: WORKSPACE, env: cleanEnv({ HOME: DATA }), stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = ''; const add = (d) => { if (out.length < 40000) out += d; };
+    child.stdout.on('data', add); child.stderr.on('data', add);
+    const timer = setTimeout(() => child.kill('SIGKILL'), 120000);
+    child.on('error', e => { clearTimeout(timer); resolve(`Error: ${e.message}`); });
+    child.on('close', (code) => { clearTimeout(timer); resolve(`exit code ${code}\n${out.slice(0, 20000)}`); });
   });
 }
 
+async function execTool(name, args, ctx) {
+  try {
+    switch (name) {
+      case 'list_files': return listTree(safePath(args.path || '.'), 3, 250).join('\n') || '(empty)';
+      case 'read_file': return fs.readFileSync(safePath(args.path), 'utf8').slice(0, 60000);
+      case 'write_file': {
+        const p = safePath(args.path); fs.mkdirSync(path.dirname(p), { recursive: true });
+        fs.writeFileSync(p, String(args.content ?? '')); return `Wrote ${path.relative(WORKSPACE, p)} (${String(args.content ?? '').length} chars)`;
+      }
+      case 'append_file': {
+        const p = safePath(args.path); fs.mkdirSync(path.dirname(p), { recursive: true });
+        fs.appendFileSync(p, String(args.content ?? '')); return `Appended to ${path.relative(WORKSPACE, p)}`;
+      }
+      case 'replace_in_file': {
+        const p = safePath(args.path); const s = fs.readFileSync(p, 'utf8');
+        const n = s.split(String(args.old)).length - 1;
+        if (n === 0) return 'Error: text to replace was not found';
+        if (n > 1) return `Error: text appears ${n} times; include more surrounding text`;
+        fs.writeFileSync(p, s.replace(String(args.old), () => String(args.new ?? ''))); return 'Replaced';
+      }
+      case 'move_file': {
+        const to = safePath(args.to); fs.mkdirSync(path.dirname(to), { recursive: true });
+        fs.renameSync(safePath(args.from), to); return 'Moved';
+      }
+      case 'delete_file': { const p = safePath(args.path); if (p === fs.realpathSync(WORKSPACE)) return 'Error: cannot delete the workspace root'; fs.rmSync(p, { recursive: true, force: true }); return 'Deleted'; }
+      case 'fetch_url': {
+        if (!/^https?:\/\//i.test(String(args.url))) return 'Error: only http(s) URLs';
+        const r = await fetch(args.url, { signal: AbortSignal.timeout(30000) });
+        return `HTTP ${r.status}\n${(await r.text()).slice(0, 40000)}`;
+      }
+      case 'run_command': return ALLOW_SHELL ? await runShell(String(args.command || '')) : 'Error: shell is disabled on this server';
+      case 'delegate_task': return await delegate(ctx, args);
+      default: return `Error: unknown tool ${name}`;
+    }
+  } catch (e) { return `Error: ${e.message}`; }
+}
+
+const toolNote = (name, a = {}) =>
+  `${name}${a.agent ? ' → ' + a.agent : a.path ? ' ' + a.path : a.from ? ` ${a.from} → ${a.to}` : a.command ? ': ' + String(a.command).slice(0, 90) : a.url ? ' ' + a.url : ''}`;
+
+// ---------------- model calls ----------------
 async function postJson(url, headers, body, timeoutMs) {
-  const r = await fetch(url, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', ...headers },
-    body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs),
-  });
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers },
+    body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
   const raw = await r.text();
   let j = {}; try { j = JSON.parse(raw); } catch (_) {}
   if (!r.ok) throw new Error(`HTTP ${r.status}: ${(j.error && (j.error.message || j.error)) || raw}`.slice(0, 600));
   return j;
 }
 
-async function runApi(account, system, prompt, timeoutMs) {
-  try {
-    const key = apiKeyOf(account);
-    if (!key) return { ok: false, text: 'No API key set for this account.' };
-    if (!account.model) return { ok: false, text: 'No model set for this account.' };
-    if (account.type === 'anthropic') {
-      const base = cleanUrl(account.baseUrl) || 'https://api.anthropic.com';
-      const j = await postJson(`${base}/v1/messages`, { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-        { model: account.model, max_tokens: 4096, system, messages: [{ role: 'user', content: prompt }] }, timeoutMs);
-      const text = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
-      return { ok: true, text };
+async function agentLoop(account, system, prompt, ctx, useTools) {
+  const key = apiKeyOf(account);
+  const started = Date.now(); const tools = [];
+  const defs = toolsFor(account);
+  const note = (name, args) => { const t = toolNote(name, args); tools.push(t); ctx.onTool(account, t); };
+  const stop = () => (ctx.aborted && ctx.aborted()) || Date.now() - started > TURN_BUDGET_MS;
+  const left = () => Math.max(5000, Math.min(5 * 60 * 1000, TURN_BUDGET_MS - (Date.now() - started)));
+  const limitMsg = '(stopped: too many tool steps or out of time)';
+
+  if (account.type === 'anthropic') {
+    const base = cleanUrl(account.baseUrl) || 'https://api.anthropic.com';
+    const msgs = [{ role: 'user', content: prompt }];
+    for (let step = 0; step < MAX_STEPS && !stop(); step++) {
+      const body = { model: account.model, max_tokens: 8192, system, messages: msgs };
+      if (useTools) body.tools = defs.map(t => ({ name: t.name, description: t.description, input_schema: t.parameters }));
+      const j = await postJson(`${base}/v1/messages`, { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, body, left());
+      const content = j.content || [];
+      const uses = content.filter(b => b.type === 'tool_use');
+      if (useTools && uses.length) {
+        msgs.push({ role: 'assistant', content });
+        const results = [];
+        for (const u of uses) { note(u.name, u.input); results.push({ type: 'tool_result', tool_use_id: u.id, content: await execTool(u.name, u.input || {}, ctx) }); }
+        msgs.push({ role: 'user', content: results }); continue;
+      }
+      return { ok: true, text: content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim(), tools };
     }
-    const base = cleanUrl(account.baseUrl) || 'https://api.openai.com/v1';
-    const j = await postJson(`${base}/chat/completions`, { Authorization: `Bearer ${key}` },
-      { model: account.model, messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] }, timeoutMs);
-    return { ok: true, text: String(j.choices?.[0]?.message?.content || '').trim() };
+    return { ok: true, text: limitMsg, tools };
+  }
+
+  const base = cleanUrl(account.baseUrl) || 'https://api.openai.com/v1';
+  const msgs = [{ role: 'system', content: system }, { role: 'user', content: prompt }];
+  for (let step = 0; step < MAX_STEPS && !stop(); step++) {
+    const body = { model: account.model, messages: msgs };
+    if (useTools) body.tools = defs.map(t => ({ type: 'function', function: t }));
+    const j = await postJson(`${base}/chat/completions`, { Authorization: `Bearer ${key}` }, body, left());
+    const m = j.choices?.[0]?.message || {};
+    if (useTools && m.tool_calls?.length) {
+      m.tool_calls.forEach((tc, i) => { if (!tc.id) tc.id = `call_${step}_${i}`; });
+      msgs.push({ role: 'assistant', content: m.content || null, tool_calls: m.tool_calls });
+      for (const tc of m.tool_calls) {
+        let args = tc.function?.arguments || {};
+        if (typeof args === 'string') { try { args = JSON.parse(args || '{}'); } catch (_) { args = {}; } }
+        note(tc.function?.name, args);
+        msgs.push({ role: 'tool', tool_call_id: tc.id, content: await execTool(tc.function?.name, args, ctx) });
+      }
+      continue;
+    }
+    return { ok: true, text: String(m.content || '').trim(), tools };
+  }
+  return { ok: true, text: limitMsg, tools };
+}
+
+async function runAgent(account, system, prompt, ctx) {
+  if (!apiKeyOf(account)) return { ok: false, text: 'No API key set for this account.', tools: [] };
+  if (!account.model) return { ok: false, text: 'No model set for this account.', tools: [] };
+  const useTools = !account.noTools;
+  try {
+    return await agentLoop(account, system, prompt, ctx, useTools);
   } catch (e) {
-    return { ok: false, text: String(e.message || e) };
+    const msg = String(e.message || e);
+    if (useTools && /HTTP (400|404|422)/.test(msg) && /tool|function/i.test(msg)) { // model has no tool support
+      try {
+        const r = await agentLoop(account, system, prompt, ctx, false);
+        return { ...r, text: `${r.text}\n\n(Note: this model does not support tools, so it could not create files.)` };
+      } catch (e2) { return { ok: false, text: String(e2.message || e2), tools: [] }; }
+    }
+    return { ok: false, text: msg, tools: [] };
   }
 }
 
-function runAgent(account, system, prompt, { timeoutMs = 10 * 60 * 1000 } = {}) {
-  if (account.type === 'claude') return runClaude(account, `${system}\n\n${prompt}`, timeoutMs);
-  return runApi(account, system, prompt, Math.min(timeoutMs, 5 * 60 * 1000));
+// ---------------- team ----------------
+const transcript = (n = 30000) => state.messages.map(m => `[${m.from}]: ${m.text}`).join('\n\n').slice(-n);
+const teamList = (except) => state.accounts.filter(a => a.id !== except).map(a => `- ${a.name}${a.role ? ` (${a.role})` : ''} [${a.model}]`).join('\n');
+const toolLine = (a) => a.noTools ? 'You cannot use tools. Put any code directly in your message in fenced code blocks.'
+  : `You have tools for the shared workspace (the current folder), so actually create and edit files with them instead of pasting large code into the chat${ALLOW_SHELL ? ', and run commands to install, build, run and test' : ''}.`;
+
+function mainSystem(a) {
+  const others = teamList(a.id);
+  return `You are "${a.name}", the MAIN AI of a small team, chatting with a human in a web app.
+${a.role ? `Your role: ${a.role}\n` : ''}${toolLine(a)}
+${others ? `Your teammates:\n${others}\nUse delegate_task to hand work to them (for example coding, reviewing, testing, debugging, research, writing docs). Give each a clear, self-contained task, then check their report and the files they changed, fix problems or send follow-up tasks, and finally tell the human what was done. Do simple things yourself.` : 'You have no teammates yet; do the work yourself.'}
+Keep chat replies concise: what you did, which files, what is left. Ask the human only when you are truly blocked.`;
+}
+function workerSystem(a, boss) {
+  return `You are "${a.name}", a worker AI on a team led by "${boss.name}".
+${a.role ? `Your role: ${a.role}\n` : ''}${toolLine(a)}
+Do the task you were given, then reply with a short report: what you did, files created or changed, and any problems.`;
 }
 
-const transcript = () => state.messages.map(m => `[${m.from}]: ${m.text}`).join('\n\n').slice(-30000);
-
-function systemFor(acct) {
-  const names = state.accounts.map(a => a.name).join(', ');
-  const canFiles = acct.type === 'claude';
-  return `You are "${acct.name}", one member of a team of AI agents (${names}) working in a shared group chat with a human.
-${acct.role ? `Your role: ${acct.role}\n` : ''}${canFiles
-    ? 'The shared working folder is your current directory; you may read and write files there.'
-    : 'You cannot access files. Put any code or file contents directly in your message in fenced code blocks so a teammate with file access can save them.'}
-Rules: build on what teammates already said, don't repeat them, hand off clearly, and write "DONE: <summary>" when the human's request is fully complete.`;
+async function delegate(ctx, args) {
+  const boss = ctx.account;
+  const w = findAccount(args.agent);
+  if (!w) return `Error: no teammate named "${args.agent}". Available:\n${teamList(boss.id)}`;
+  if (w.id === boss.id) return 'Error: you cannot delegate to yourself';
+  ctx.send('thinking', { from: w.name });
+  const prompt = `Task from ${boss.name}:\n${String(args.task || '')}\n\nRecent conversation for context:\n${transcript(6000)}`;
+  const r = await runAgent(w, workerSystem(w, boss), prompt, { ...ctx, account: w });
+  const msg = { from: w.name, text: r.text || '(no reply)', error: !r.ok, tools: r.tools, worker: true, ts: Date.now() };
+  state.messages.push(msg); save(); ctx.send('message', { message: msg });
+  return (r.ok ? '' : 'The teammate failed: ') + (r.text || '(no reply)').slice(0, 12000);
 }
 
+let busy = false;
+async function chat(req, res) {
+  const body = await readBody(req);
+  const text = String(body.text || '').trim();
+  const main = mainAccount();
+  if (!text) return json(res, 400, { error: 'Empty message' });
+  if (!main) return json(res, 400, { error: 'Add at least one account first' });
+  if (busy) return json(res, 409, { error: 'The team is still working on the previous message' });
+  busy = true;
+
+  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+  const send = (type, data) => { if (!res.writableEnded) res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`); };
+  let aborted = false; res.on('close', () => { aborted = true; });
+  try {
+    const userMsg = { from: 'You', text, ts: Date.now() };
+    state.messages.push(userMsg); save(); send('message', { message: userMsg });
+    send('thinking', { from: main.name });
+    const ctx = { account: main, send, aborted: () => aborted, onTool: (acct, t) => send('tool', { from: acct.name, tool: t }) };
+    const r = await runAgent(main, mainSystem(main), `Conversation so far:\n${transcript()}\n\nReply to the human's latest message now.`, ctx);
+    const msg = { from: main.name, text: r.text || '(no reply)', error: !r.ok, tools: r.tools, main: true, ts: Date.now() };
+    state.messages.push(msg); save(); send('message', { message: msg });
+  } finally { busy = false; send('end', {}); res.end(); }
+}
+
+// ---------------- http ----------------
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css' };
 function serveStatic(req, res, pathname) {
   const rel = pathname === '/' ? 'index.html' : pathname.slice(1);
@@ -151,52 +328,6 @@ function serveStatic(req, res, pathname) {
     res.writeHead(200, { 'Content-Type': MIME[path.extname(p)] || 'application/octet-stream' });
     res.end(buf);
   });
-}
-
-async function chat(req, res) {
-  const body = await readBody(req);
-  const text = String(body.text || '').trim();
-  const rounds = Math.min(Math.max(parseInt(body.rounds) || 1, 1), 5);
-  if (!text) return json(res, 400, { error: 'Empty message' });
-  if (!state.accounts.length) return json(res, 400, { error: 'Add at least one account first' });
-
-  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-  const send = (type, data) => res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`);
-  let aborted = false;
-  res.on('close', () => { aborted = true; });
-
-  const userMsg = { from: 'You', text, ts: Date.now() };
-  state.messages.push(userMsg); save();
-  send('message', { message: userMsg });
-
-  let finished = false;
-  for (let r = 0; r < rounds && !aborted && !finished; r++) {
-    for (const acct of state.accounts) {
-      if (aborted) break;
-      send('thinking', { from: acct.name });
-      const result = await runAgent(acct, systemFor(acct), `Conversation so far:\n${transcript()}\n\nWrite your next message to the group now.`);
-      const msg = { from: acct.name, text: result.text || '(no reply)', error: !result.ok, ts: Date.now() };
-      state.messages.push(msg); save();
-      send('message', { message: msg });
-      if (result.ok && /(^|\n)DONE:/.test(result.text)) { finished = true; break; }
-    }
-  }
-  send('end', {});
-  res.end();
-}
-
-function listFiles() {
-  const out = [];
-  const walk = (dir, depth) => {
-    if (depth > 4 || out.length > 300) return;
-    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (e.name.startsWith('.')) continue;
-      const p = path.join(dir, e.name);
-      if (e.isDirectory()) walk(p, depth + 1); else out.push(path.relative(WORKSPACE, p));
-    }
-  };
-  try { walk(WORKSPACE, 0); } catch (_) {}
-  return out;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -217,58 +348,63 @@ const server = http.createServer(async (req, res) => {
     if (APP_PASSWORD && !sessions.has(cookieOf(req))) return json(res, 401, { error: 'Not logged in' });
 
     if (req.method === 'GET' && p === '/api/state')
-      return json(res, 200, { accounts: state.accounts.map(publicAccount), messages: state.messages, workspace: WORKSPACE, claudeBin: CLAUDE_BIN });
+      return json(res, 200, { accounts: state.accounts.map(publicAccount), messages: state.messages, mainId: state.mainId, workspace: WORKSPACE, workspaceWritable, shell: ALLOW_SHELL, busy });
 
     if (req.method === 'POST' && p === '/api/accounts') {
       const b = await readBody(req);
       const name = String(b.name || '').trim().slice(0, 40);
-      const type = TYPES.includes(b.type) ? b.type : 'claude';
+      const type = TYPES.includes(b.type) ? b.type : 'openai';
       if (!name) return json(res, 400, { error: 'Name required' });
-      const acct = { name, type, role: String(b.role || '').trim().slice(0, 400) };
-      if (type === 'claude') {
-        if (b.oauthToken) acct.oauthToken = String(b.oauthToken).trim();
-      } else {
-        acct.model = String(b.model || '').trim().slice(0, 120);
-        acct.baseUrl = cleanUrl(b.baseUrl);
-        if (b.apiKey) acct.apiKey = String(b.apiKey).trim();
-        if (b.keyEnv) acct.keyEnv = String(b.keyEnv).trim().replace(/[^A-Za-z0-9_]/g, '');
-        if (!acct.model) return json(res, 400, { error: 'Model name required' });
-        if (acct.baseUrl && !/^https?:\/\//.test(acct.baseUrl)) return json(res, 400, { error: 'Base URL must start with http:// or https://' });
-      }
+      const acct = { name, type, role: String(b.role || '').trim().slice(0, 400), model: String(b.model || '').trim().slice(0, 120), baseUrl: cleanUrl(b.baseUrl) };
+      if (!acct.model) return json(res, 400, { error: 'Model name required' });
+      if (acct.baseUrl && !/^https?:\/\//.test(acct.baseUrl)) return json(res, 400, { error: 'Base URL must start with http:// or https://' });
+      if (b.apiKey) acct.apiKey = String(b.apiKey).trim();
+      if (b.keyEnv) acct.keyEnv = String(b.keyEnv).trim().replace(/[^A-Za-z0-9_]/g, '');
+      if (b.noTools) acct.noTools = true;
       let id = slug(name), n = 2; const base = id;
       while (state.accounts.some(a => a.id === id)) id = `${base}-${n++}`;
-      acct.id = id;
-      state.accounts.push(acct);
-      if (type === 'claude') fs.mkdirSync(profileDir(id), { recursive: true });
-      save();
-      return json(res, 200, publicAccount(acct));
+      acct.id = id; state.accounts.push(acct);
+      if (!state.mainId) state.mainId = id;
+      save(); return json(res, 200, publicAccount(acct));
     }
 
-    const m = p.match(/^\/api\/accounts\/([^/]+)(\/check)?$/);
+    const m = p.match(/^\/api\/accounts\/([^/]+)(\/check|\/main)?$/);
     if (m) {
-      const id = m[1];
-      if (!safeId(id)) return json(res, 400, { error: 'Bad id' });
+      const a = state.accounts.find(x => x.id === m[1]);
+      if (!a) return json(res, 404, { error: 'Unknown account' });
       if (req.method === 'DELETE' && !m[2]) {
-        state.accounts = state.accounts.filter(a => a.id !== id);
-        fs.rmSync(profileDir(id), { recursive: true, force: true });
+        state.accounts = state.accounts.filter(x => x.id !== a.id);
+        if (state.mainId === a.id) state.mainId = state.accounts[0]?.id || '';
         save(); return json(res, 200, { ok: true });
       }
-      if (req.method === 'POST' && m[2]) {
-        const a = state.accounts.find(x => x.id === id);
-        if (!a) return json(res, 404, { error: 'Unknown account' });
-        const r = await runAgent(a, 'You are a connection test.', 'Reply with the single word: ready', { timeoutMs: 90000 });
-        return json(res, 200, { signedIn: r.ok, detail: r.ok ? 'Connected' : r.text });
+      if (req.method === 'POST' && m[2] === '/main') { state.mainId = a.id; save(); return json(res, 200, { ok: true }); }
+      if (req.method === 'POST' && m[2] === '/check') {
+        const r = await runAgent({ ...a, noTools: true }, 'You are a connection test.', 'Reply with the single word: ready', { onTool() {}, send() {} });
+        return json(res, 200, { ok: r.ok, detail: r.ok ? 'Connected' : r.text });
       }
     }
 
     if (req.method === 'POST' && p === '/api/reset') { state.messages = []; save(); return json(res, 200, { ok: true }); }
     if (req.method === 'POST' && p === '/api/chat') return chat(req, res);
-    if (req.method === 'GET' && p === '/api/files') return json(res, 200, { files: listFiles() });
-    if (req.method === 'GET' && p === '/api/file') {
-      const f = path.resolve(WORKSPACE, url.searchParams.get('path') || '');
-      if (!f.startsWith(path.resolve(WORKSPACE) + path.sep)) return json(res, 400, { error: 'Bad path' });
-      try { res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' }); return res.end(fs.readFileSync(f, 'utf8').slice(0, 200000)); }
-      catch (_) { return json(res, 404, { error: 'Not found' }); }
+
+    // file manager
+    if (req.method === 'GET' && p === '/api/files') return json(res, 200, { files: listTree(WORKSPACE, 6, 500) });
+    if (p === '/api/file') {
+      if (req.method === 'POST') {
+        const b = await readBody(req);
+        const f = safePath(b.path); if (f === fs.realpathSync(WORKSPACE)) return json(res, 400, { error: 'Bad path' });
+        fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, String(b.content ?? ''));
+        return json(res, 200, { ok: true });
+      }
+      const f = safePath(url.searchParams.get('path') || '');
+      if (req.method === 'DELETE') { fs.rmSync(f, { recursive: true, force: true }); return json(res, 200, { ok: true }); }
+      if (req.method === 'GET') {
+        const dl = !!url.searchParams.get('download');
+        const headers = { 'Content-Type': dl ? 'application/octet-stream' : 'text/plain; charset=utf-8' };
+        if (dl) headers['Content-Disposition'] = `attachment; filename="${path.basename(f).replace(/"/g, '')}"`;
+        try { const buf = fs.readFileSync(f); res.writeHead(200, headers); return res.end(dl ? buf : buf.subarray(0, 300000)); }
+        catch (_) { return json(res, 404, { error: 'Not found' }); }
+      }
     }
     json(res, 404, { error: 'Not found' });
   } catch (e) {
@@ -277,6 +413,6 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`Claude Team running on http://${HOST}:${PORT}`);
+  console.log(`Team Agent running on http://${HOST}:${PORT}`);
   if (!APP_PASSWORD) console.log('WARNING: APP_PASSWORD is not set. Only use this on localhost.');
 });

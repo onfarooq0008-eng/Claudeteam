@@ -3,48 +3,54 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Claude Team</title>
+<title>Team Agent</title>
 <style>
-  :root { --bg:#faf9f5; --panel:#fff; --ink:#1f1e1d; --mute:#73726c; --line:#e6e3da; --accent:#c96442; --accent-ink:#fff; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#262624; --panel:#30302e; --ink:#f0eee6; --mute:#a3a198; --line:#41403d; } }
+  :root { --bg:#faf9f5; --panel:#fff; --ink:#1f1e1d; --mute:#73726c; --line:#e6e3da; --accent:#c96442; --accent-ink:#fff; --worker:#eef3f8; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#262624; --panel:#30302e; --ink:#f0eee6; --mute:#a3a198; --line:#41403d; --worker:#2b3138; } }
   * { box-sizing: border-box; }
   body { margin:0; font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif; background:var(--bg); color:var(--ink); height:100dvh; display:flex; flex-direction:column; }
   header { display:flex; align-items:center; gap:8px; padding:10px 14px; border-bottom:1px solid var(--line); background:var(--panel); }
-  header h1 { font-size:16px; margin:0; flex:1; }
+  header h1 { font-size:16px; margin:0; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   button { font:inherit; border:1px solid var(--line); background:var(--panel); color:var(--ink); border-radius:8px; padding:6px 12px; cursor:pointer; }
   button.primary { background:var(--accent); color:var(--accent-ink); border-color:var(--accent); }
+  button.danger { color:#c0392b; }
   button:disabled { opacity:.5; cursor:default; }
   main { flex:1; display:flex; min-height:0; }
-  aside { width:300px; border-right:1px solid var(--line); background:var(--panel); overflow:auto; padding:12px; display:none; }
+  aside { width:310px; border-right:1px solid var(--line); background:var(--panel); overflow:auto; padding:12px; display:none; }
   aside.open { display:block; }
   @media (max-width:760px){ aside.open { position:fixed; inset:49px 0 0 0; width:auto; z-index:5; } }
   section.chat { flex:1; display:flex; flex-direction:column; min-width:0; }
   #log { flex:1; overflow:auto; padding:14px; display:flex; flex-direction:column; gap:12px; }
-  .msg { max-width:760px; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:10px 12px; white-space:pre-wrap; word-break:break-word; }
+  .msg { max-width:780px; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:10px 12px; white-space:pre-wrap; word-break:break-word; }
   .msg.you { align-self:flex-end; background:var(--accent); color:var(--accent-ink); border-color:var(--accent); }
+  .msg.worker { background:var(--worker); margin-left:18px; font-size:14px; }
   .msg.err { border-color:#c0392b; }
   .who { font-size:12px; font-weight:600; color:var(--mute); margin-bottom:2px; }
   .you .who { color:#fff; opacity:.85; }
   .think { color:var(--mute); font-style:italic; }
+  .tools { font-size:12px; color:var(--mute); margin-top:6px; border-top:1px dashed var(--line); padding-top:4px; font-family:ui-monospace,Menlo,monospace; white-space:pre-wrap; }
   form.send { display:flex; gap:8px; padding:10px; border-top:1px solid var(--line); background:var(--panel); align-items:flex-end; }
   textarea, input, select { font:inherit; color:var(--ink); background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:8px; width:100%; }
   textarea { resize:none; max-height:160px; }
   .acct { border:1px solid var(--line); border-radius:10px; padding:10px; margin-bottom:10px; }
-  .acct b { display:block; } .acct small { color:var(--mute); display:block; margin:2px 0 6px; }
-  .acct code { display:block; background:var(--bg); padding:6px; border-radius:6px; font-size:12px; word-break:break-all; user-select:all; margin:6px 0; }
+  .acct.main { border-color:var(--accent); }
+  .acct b { display:block; } .acct small { color:var(--mute); display:block; margin:2px 0 6px; word-break:break-all; }
   .row { display:flex; gap:6px; flex-wrap:wrap; }
   .stack { display:flex; flex-direction:column; gap:6px; } .stack[hidden] { display:none; }
   .tag { display:inline-block; font-size:11px; border:1px solid var(--line); border-radius:6px; padding:0 6px; margin-left:6px; color:var(--mute); font-weight:400; }
+  .tag.main { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .warn { background:#fdecea; color:#8a1f11; border:1px solid #e5a29a; border-radius:8px; padding:8px; font-size:13px; margin-bottom:8px; }
   h3 { margin:14px 0 6px; font-size:13px; color:var(--mute); text-transform:uppercase; letter-spacing:.04em; }
   .file { cursor:pointer; padding:3px 0; font-size:13px; color:var(--accent); word-break:break-all; }
-  dialog { border:1px solid var(--line); border-radius:12px; background:var(--panel); color:var(--ink); max-width:min(720px,92vw); width:100%; }
-  dialog pre { white-space:pre-wrap; word-break:break-word; max-height:60vh; overflow:auto; font-size:13px; }
+  .file.dir { color:var(--mute); cursor:default; }
+  dialog { border:1px solid var(--line); border-radius:12px; background:var(--panel); color:var(--ink); max-width:min(760px,94vw); width:100%; }
+  dialog textarea { height:50vh; font:13px/1.4 ui-monospace,Menlo,monospace; max-height:none; resize:vertical; }
   #login { margin:auto; width:min(340px,90vw); display:flex; flex-direction:column; gap:10px; }
 </style>
 </head>
 <body>
 <div id="login" hidden>
-  <h2>Claude Team</h2>
+  <h2>Team Agent</h2>
   <input id="pw" type="password" placeholder="App password" autocomplete="current-password">
   <button class="primary" id="pwBtn">Sign in</button>
   <small id="pwErr" style="color:#c0392b"></small>
@@ -53,63 +59,67 @@
 <div id="app" style="display:none;flex-direction:column;flex:1;min-height:0">
   <header>
     <button id="menu">☰ Team</button>
-    <h1>Claude Team</h1>
-    <select id="rounds" style="width:auto" title="How many times each account speaks per message">
-      <option value="1">1 round</option><option value="2">2 rounds</option><option value="3">3 rounds</option><option value="5">5 rounds</option>
-    </select>
-    <button id="reset">Clear</button>
+    <h1 id="title">Team Agent</h1>
+    <button id="reset">Clear chat</button>
   </header>
   <main>
     <aside id="side">
+      <div id="warn"></div>
       <h3>Accounts</h3>
       <div id="accts"></div>
       <h3>Add account</h3>
       <div class="stack">
         <select id="aType">
-          <option value="claude">Claude Code (account login / token)</option>
           <option value="openai">Custom API (OpenAI-compatible)</option>
           <option value="anthropic">Anthropic API key</option>
         </select>
-        <input id="aName" placeholder="Name (e.g. Architect, nvidia 1)">
-        <textarea id="aRole" rows="2" placeholder="Role (optional, e.g. plans the work and reviews code)"></textarea>
-        <div id="fClaude" class="stack">
-          <input id="aTok" type="password" placeholder="Claude token (from `claude setup-token`) — optional" autocomplete="off">
-        </div>
-        <div id="fApi" class="stack" hidden>
-          <select id="aPreset"></select>
-          <input id="aUrl" placeholder="Base URL">
-          <input id="aModel" placeholder="Model name (e.g. gpt-4o-mini)">
-          <input id="aKey" type="password" placeholder="API key" autocomplete="off">
-          <input id="aKeyEnv" placeholder="…or env var name holding the key (e.g. OPENROUTER_KEY)">
-        </div>
+        <input id="aName" placeholder="Name (e.g. Boss, Coder, nvidia 1)">
+        <textarea id="aRole" rows="2" placeholder="Role (optional, e.g. writes code, reviews, tests)"></textarea>
+        <select id="aPreset"></select>
+        <input id="aUrl" placeholder="Base URL">
+        <input id="aModel" placeholder="Model name (e.g. gpt-4o-mini)">
+        <input id="aKey" type="password" placeholder="API key" autocomplete="off">
+        <input id="aKeyEnv" placeholder="…or env var name holding the key (e.g. OPENROUTER_KEY)">
+        <label style="font-size:13px;color:var(--mute)"><input id="aNoTools" type="checkbox" style="width:auto"> Disable tools (model can't use function calling)</label>
         <button class="primary" id="aAdd">Add</button>
       </div>
-      <h3>Shared workspace</h3>
+      <h3>Files</h3>
       <div id="wsPath" style="font-size:12px;color:var(--mute);word-break:break-all"></div>
       <div id="files"></div>
-      <button id="refreshFiles" style="margin-top:6px">Refresh files</button>
+      <div class="row" style="margin-top:6px"><button id="newFile">+ New file</button><button id="refreshFiles">Refresh</button></div>
     </aside>
     <section class="chat">
       <div id="log"></div>
       <form class="send" id="form">
-        <textarea id="text" rows="1" placeholder="Give the team a task…"></textarea>
+        <textarea id="text" rows="1" placeholder="Message your main AI…"></textarea>
         <button class="primary" id="sendBtn">Send</button>
       </form>
     </section>
   </main>
 </div>
 
-<dialog id="dlg"><b id="dlgTitle"></b><pre id="dlgBody"></pre><button onclick="dlg.close()">Close</button></dialog>
+<dialog id="dlg">
+  <b id="dlgTitle"></b>
+  <textarea id="dlgBody" spellcheck="false"></textarea>
+  <div class="row" style="margin-top:8px">
+    <button class="primary" id="dlgSave">Save</button>
+    <button id="dlgDl">Download</button>
+    <button class="danger" id="dlgDel">Delete</button>
+    <button id="dlgClose">Close</button>
+  </div>
+</dialog>
 
 <script>
 const $ = (id) => document.getElementById(id);
 let st = { accounts: [], messages: [] };
+let openFile = '';
 
 async function api(url, opts = {}) {
   const r = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...opts });
   if (r.status === 401) { showLogin(); throw new Error('login'); }
   return r;
 }
+const post = (url, body) => api(url, { method: 'POST', body: JSON.stringify(body || {}) });
 function showLogin() { $('login').hidden = false; $('login').style.display = 'flex'; $('app').style.display = 'none'; }
 $('pwBtn').onclick = async () => {
   const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: $('pw').value }) });
@@ -117,58 +127,74 @@ $('pwBtn').onclick = async () => {
 };
 $('pw').addEventListener('keydown', e => { if (e.key === 'Enter') $('pwBtn').click(); });
 
+function toolsBox(list) {
+  const x = document.createElement('div'); x.className = 'tools';
+  x.textContent = list.map(z => '🔧 ' + z).join('\n'); return x;
+}
 function addMsg(m) {
   const d = document.createElement('div');
-  d.className = 'msg' + (m.from === 'You' ? ' you' : '') + (m.error ? ' err' : '');
-  const w = document.createElement('div'); w.className = 'who'; w.textContent = m.from;
+  d.className = 'msg' + (m.from === 'You' ? ' you' : '') + (m.worker ? ' worker' : '') + (m.error ? ' err' : '');
+  const w = document.createElement('div'); w.className = 'who'; w.textContent = m.from + (m.main ? ' · main' : m.worker ? ' · teammate' : '');
   const t = document.createElement('div'); t.textContent = m.text;
-  d.append(w, t); $('log').append(d); $('log').scrollTop = 1e9; return d;
+  d.append(w, t);
+  if (m.tools && m.tools.length) d.append(toolsBox(m.tools));
+  $('log').append(d); $('log').scrollTop = 1e9; return d;
 }
 
 function renderAccounts() {
-  $('accts').innerHTML = '';
-  if (!st.accounts.length) $('accts').innerHTML = '<small style="color:var(--mute)">No accounts yet. Add one below.</small>';
+  const box = $('accts'); box.innerHTML = '';
+  if (!st.accounts.length) box.innerHTML = '<small style="color:var(--mute)">No accounts yet. Add one below. The first one becomes your main AI.</small>';
   for (const a of st.accounts) {
-    const d = document.createElement('div'); d.className = 'acct';
-    d.innerHTML = '<b><span></span><span class="tag"></span></b><small></small><div data-h></div><code></code><div class="row"><button data-c>Test connection</button><button data-d>Remove</button></div><small data-s></small>';
-    d.querySelector('b span').textContent = a.name;
-    d.querySelector('.tag').textContent = a.type === 'claude' ? 'Claude Code' : a.type === 'anthropic' ? 'Anthropic API' : 'API';
-    d.querySelector('small').textContent = a.role || 'No role set';
-    const code = d.querySelector('code'), hint = d.querySelector('[data-h]');
-    if (a.type === 'claude') {
-      if (a.hasKey) { hint.textContent = 'Signed in with a saved token.'; code.remove(); }
-      else { hint.textContent = 'Sign in once on the server with the official login:'; code.textContent = `CLAUDE_CONFIG_DIR="${a.dir}" ${st.claudeBin} auth login`; }
-    } else {
-      hint.textContent = `${a.model} · ${a.baseUrl || (a.type === 'anthropic' ? 'api.anthropic.com' : 'api.openai.com/v1')}` + (a.hasKey ? '' : ' · no key set');
-      code.remove();
-    }
+    const d = document.createElement('div'); d.className = 'acct' + (a.main ? ' main' : '');
+    d.innerHTML = '<b><span data-n></span><span class="tag" data-t></span></b><small data-r></small><small data-m></small><div class="row"><button data-c>Test</button><button data-p>Make main</button><button data-d class="danger">Remove</button></div><small data-s></small>';
+    d.querySelector('[data-n]').textContent = a.name;
+    const tag = d.querySelector('[data-t]'); tag.textContent = a.main ? 'MAIN' : a.type === 'anthropic' ? 'Anthropic' : 'API'; if (a.main) tag.classList.add('main');
+    d.querySelector('[data-r]').textContent = a.role || 'No role set';
+    d.querySelector('[data-m]').textContent = `${a.model} · ${a.baseUrl || (a.type === 'anthropic' ? 'api.anthropic.com' : 'api.openai.com/v1')}` + (a.hasKey ? '' : ' · no key set') + (a.noTools ? ' · tools off' : '');
+    if (a.main) d.querySelector('[data-p]').remove();
     d.querySelector('[data-c]').onclick = async (e) => {
-      e.target.disabled = true; const s = d.querySelector('[data-s]'); s.textContent = 'Checking…';
-      const r = await (await api(`/api/accounts/${a.id}/check`, { method: 'POST' })).json();
-      s.textContent = r.signedIn ? '✓ Connected' : '✗ ' + r.detail; e.target.disabled = false;
+      e.target.disabled = true; const s = d.querySelector('[data-s]'); s.textContent = 'Testing…';
+      const r = await (await post(`/api/accounts/${a.id}/check`)).json();
+      s.textContent = r.ok ? '✓ Connected' : '✗ ' + r.detail; e.target.disabled = false;
     };
+    const mk = d.querySelector('[data-p]');
+    if (mk) mk.onclick = async () => { await post(`/api/accounts/${a.id}/main`); load(); };
     d.querySelector('[data-d]').onclick = async () => {
-      if (!confirm(`Remove ${a.name} and its saved login?`)) return;
+      if (!confirm(`Remove ${a.name}?`)) return;
       await api(`/api/accounts/${a.id}`, { method: 'DELETE' }); load();
     };
-    $('accts').append(d);
+    box.append(d);
   }
 }
 
 async function loadFiles() {
   const { files } = await (await api('/api/files')).json();
   $('files').innerHTML = '';
-  if (!files.length) $('files').innerHTML = '<small style="color:var(--mute)">Empty</small>';
+  if (!files.length) $('files').innerHTML = '<small style="color:var(--mute)">Empty. Ask your AI to build something.</small>';
   for (const f of files) {
-    const d = document.createElement('div'); d.className = 'file'; d.textContent = f;
-    d.onclick = async () => { $('dlgTitle').textContent = f; $('dlgBody').textContent = await (await api('/api/file?path=' + encodeURIComponent(f))).text(); $('dlg').showModal(); };
+    const d = document.createElement('div'); d.className = 'file' + (f.endsWith('/') ? ' dir' : '');
+    d.textContent = (f.endsWith('/') ? '📁 ' : '📄 ') + f;
+    if (!f.endsWith('/')) d.onclick = () => showFile(f);
     $('files').append(d);
   }
 }
+async function showFile(f) {
+  openFile = f; $('dlgTitle').textContent = f;
+  const r = await api('/api/file?path=' + encodeURIComponent(f));
+  $('dlgBody').value = r.ok ? await r.text() : ''; $('dlg').showModal();
+}
+$('dlgClose').onclick = () => $('dlg').close();
+$('dlgSave').onclick = async () => { await post('/api/file', { path: openFile, content: $('dlgBody').value }); $('dlg').close(); loadFiles(); };
+$('dlgDl').onclick = () => { location.href = '/api/file?download=1&path=' + encodeURIComponent(openFile); };
+$('dlgDel').onclick = async () => { if (!confirm(`Delete ${openFile}?`)) return; await api('/api/file?path=' + encodeURIComponent(openFile), { method: 'DELETE' }); $('dlg').close(); loadFiles(); };
+$('newFile').onclick = () => { const p = prompt('New file path (e.g. notes/todo.md)'); if (p) { openFile = p.trim(); $('dlgTitle').textContent = openFile; $('dlgBody').value = ''; $('dlg').showModal(); } };
 
 async function load() {
   st = await (await api('/api/state')).json();
+  const main = st.accounts.find(a => a.main);
+  $('title').textContent = main ? `Team Agent · main: ${main.name}` : 'Team Agent';
   $('wsPath').textContent = st.workspace;
+  $('warn').innerHTML = st.workspaceWritable ? '' : '<div class="warn">The workspace folder is not writable, so agents cannot save files. If you mounted a volume, make sure the app can write to it.</div>';
   renderAccounts();
   $('log').innerHTML = ''; st.messages.forEach(addMsg);
   loadFiles();
@@ -176,40 +202,30 @@ async function load() {
 
 $('menu').onclick = () => $('side').classList.toggle('open');
 $('refreshFiles').onclick = loadFiles;
+$('reset').onclick = async () => { if (confirm('Clear the conversation? Files are kept.')) { await post('/api/reset'); load(); } };
+
 const PRESETS = [
-  ['Custom (enter URL)', ''],
-  ['OpenAI', 'https://api.openai.com/v1'],
-  ['OpenRouter', 'https://openrouter.ai/api/v1'],
-  ['NVIDIA NIM', 'https://integrate.api.nvidia.com/v1'],
-  ['Groq', 'https://api.groq.com/openai/v1'],
-  ['Together AI', 'https://api.together.xyz/v1'],
-  ['DeepSeek', 'https://api.deepseek.com/v1'],
-  ['Mistral', 'https://api.mistral.ai/v1'],
-  ['Google Gemini', 'https://generativelanguage.googleapis.com/v1beta/openai'],
+  ['Custom (enter URL)', ''], ['OpenAI', 'https://api.openai.com/v1'], ['OpenRouter', 'https://openrouter.ai/api/v1'],
+  ['NVIDIA NIM', 'https://integrate.api.nvidia.com/v1'], ['Groq', 'https://api.groq.com/openai/v1'],
+  ['Together AI', 'https://api.together.xyz/v1'], ['DeepSeek', 'https://api.deepseek.com/v1'],
+  ['Mistral', 'https://api.mistral.ai/v1'], ['Google Gemini', 'https://generativelanguage.googleapis.com/v1beta/openai'],
   ['Ollama (local)', 'http://localhost:11434/v1'],
 ];
 PRESETS.forEach(([n, u]) => { const o = document.createElement('option'); o.textContent = n; o.value = u; $('aPreset').append(o); });
 $('aPreset').onchange = () => { $('aUrl').value = $('aPreset').value; };
 function syncType() {
-  const t = $('aType').value;
-  $('fClaude').hidden = t !== 'claude'; $('fApi').hidden = t === 'claude';
-  $('aPreset').hidden = t === 'anthropic';
-  if (t === 'anthropic') $('aUrl').placeholder = 'Base URL (optional, default api.anthropic.com)';
-  else $('aUrl').placeholder = 'Base URL';
+  const a = $('aType').value === 'anthropic';
+  $('aPreset').hidden = a; $('aUrl').placeholder = a ? 'Base URL (optional, default api.anthropic.com)' : 'Base URL';
 }
 $('aType').onchange = syncType; syncType();
 $('aAdd').onclick = async () => {
   const name = $('aName').value.trim(); if (!name) return;
-  const type = $('aType').value;
-  const body = { name, type, role: $('aRole').value };
-  if (type === 'claude') body.oauthToken = $('aTok').value;
-  else Object.assign(body, { baseUrl: $('aUrl').value, model: $('aModel').value, apiKey: $('aKey').value, keyEnv: $('aKeyEnv').value });
-  const r = await api('/api/accounts', { method: 'POST', body: JSON.stringify(body) });
+  const r = await post('/api/accounts', { name, type: $('aType').value, role: $('aRole').value, baseUrl: $('aUrl').value,
+    model: $('aModel').value, apiKey: $('aKey').value, keyEnv: $('aKeyEnv').value, noTools: $('aNoTools').checked });
   if (!r.ok) { alert((await r.json()).error); return; }
-  ['aName', 'aRole', 'aTok', 'aUrl', 'aModel', 'aKey', 'aKeyEnv'].forEach(i => $(i).value = ''); $('aPreset').selectedIndex = 0;
+  ['aName', 'aRole', 'aUrl', 'aModel', 'aKey', 'aKeyEnv'].forEach(i => $(i).value = ''); $('aPreset').selectedIndex = 0; $('aNoTools').checked = false;
   load();
 };
-$('reset').onclick = async () => { if (confirm('Clear the conversation?')) { await api('/api/reset', { method: 'POST' }); load(); } };
 
 const ta = $('text');
 ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; });
@@ -219,9 +235,11 @@ $('form').onsubmit = async (e) => {
   e.preventDefault();
   const text = ta.value.trim(); if (!text) return;
   ta.value = ''; ta.style.height = 'auto'; $('sendBtn').disabled = true;
-  let thinking = null;
+  const thinking = {}; // agent name -> placeholder element
+  const think = (name) => { if (thinking[name]) return thinking[name];
+    const el = addMsg({ from: name, text: 'working…' }); el.children[1].classList.add('think'); return (thinking[name] = el); };
   try {
-    const r = await api('/api/chat', { method: 'POST', body: JSON.stringify({ text, rounds: $('rounds').value }) });
+    const r = await post('/api/chat', { text });
     if (!r.ok) { addMsg({ from: 'System', text: (await r.json()).error, error: true }); return; }
     const reader = r.body.getReader(), dec = new TextDecoder(); let buf = '';
     for (;;) {
@@ -229,12 +247,20 @@ $('form').onsubmit = async (e) => {
       buf += dec.decode(value, { stream: true });
       let i; while ((i = buf.indexOf('\n\n')) >= 0) {
         const ev = JSON.parse(buf.slice(6, i)); buf = buf.slice(i + 2);
-        if (thinking) { thinking.remove(); thinking = null; }
-        if (ev.type === 'message') addMsg(ev.message);
-        if (ev.type === 'thinking') { thinking = addMsg({ from: ev.from, text: 'working…' }); thinking.querySelector('div:last-child').classList.add('think'); }
+        if (ev.type === 'thinking') { think(ev.from); }
+        else if (ev.type === 'tool') {
+          const el = think(ev.from); let box = el.querySelector('.tools');
+          if (!box) { box = document.createElement('div'); box.className = 'tools'; el.append(box); }
+          box.textContent += (box.textContent ? '\n' : '') + '🔧 ' + ev.tool; $('log').scrollTop = 1e9; loadFiles();
+        }
+        else if (ev.type === 'message') {
+          if (ev.message.from !== 'You' && thinking[ev.message.from]) { thinking[ev.message.from].remove(); delete thinking[ev.message.from]; }
+          addMsg(ev.message);
+          if (ev.message.worker) { /* the boss keeps working: show its placeholder again below */ const boss = st.accounts.find(a => a.main); if (boss && thinking[boss.name]) { const el = thinking[boss.name]; el.remove(); $('log').append(el); } }
+        }
       }
     }
-  } catch (_) {} finally { if (thinking) thinking.remove(); $('sendBtn').disabled = false; loadFiles(); }
+  } catch (_) {} finally { Object.values(thinking).forEach(el => el.remove()); $('sendBtn').disabled = false; loadFiles(); }
 };
 
 async function start() {
