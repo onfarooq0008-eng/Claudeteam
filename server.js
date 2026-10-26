@@ -122,7 +122,7 @@ const DELEGATE_TOOL = { name: 'delegate_task',
   parameters: { type: 'object', properties: { agent: { type: 'string', description: 'Teammate name' }, task: { type: 'string' } }, required: ['agent', 'task'] } };
 
 const isMain = (a) => a.id === state.mainId && state.accounts.length > 1;
-const toolsFor = (a) => isMain(a) ? [...BASE_TOOLS, DELEGATE_TOOL] : BASE_TOOLS;
+const toolsFor = (a, ctx) => isMain(a) && !(ctx && ctx.noDelegate) ? [...BASE_TOOLS, DELEGATE_TOOL] : BASE_TOOLS;
 
 function cleanEnv(extra = {}) {
   const env = { ...process.env, ...extra };
@@ -182,6 +182,15 @@ const toolNote = (name, a = {}) =>
   `${name}${a.agent ? ' → ' + a.agent : a.path ? ' ' + a.path : a.from ? ` ${a.from} → ${a.to}` : a.command ? ': ' + String(a.command).slice(0, 90) : a.url ? ' ' + a.url : ''}`;
 
 // ---------------- model calls ----------------
+async function postRetry(...args) {
+  for (let t = 0; ; t++) {
+    try { return await postJson(...args); }
+    catch (e) {
+      if (t < 3 && /HTTP (429|500|502|503|504)/.test(String(e.message))) { await new Promise(r => setTimeout(r, 4000 * (t + 1))); continue; }
+      throw e;
+    }
+  }
+}
 async function postJson(url, headers, body, timeoutMs) {
   const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers },
     body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
@@ -194,7 +203,7 @@ async function postJson(url, headers, body, timeoutMs) {
 async function agentLoop(account, system, prompt, ctx, useTools) {
   const key = apiKeyOf(account);
   const started = Date.now(); const tools = [];
-  const defs = toolsFor(account);
+  const defs = toolsFor(account, ctx);
   const note = (name, args) => { const t = toolNote(name, args); tools.push(t); ctx.onTool(account, t); };
   const stop = () => (ctx.aborted && ctx.aborted()) || Date.now() - started > TURN_BUDGET_MS;
   const left = () => Math.max(5000, Math.min(5 * 60 * 1000, TURN_BUDGET_MS - (Date.now() - started)));
@@ -206,7 +215,7 @@ async function agentLoop(account, system, prompt, ctx, useTools) {
     for (let step = 0; step < MAX_STEPS && !stop(); step++) {
       const body = { model: account.model, max_tokens: 8192, system, messages: msgs };
       if (useTools) body.tools = defs.map(t => ({ name: t.name, description: t.description, input_schema: t.parameters }));
-      const j = await postJson(`${base}/v1/messages`, { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, body, left());
+      const j = await postRetry(`${base}/v1/messages`, { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, body, left());
       const content = j.content || [];
       const uses = content.filter(b => b.type === 'tool_use');
       if (useTools && uses.length) {
@@ -225,7 +234,7 @@ async function agentLoop(account, system, prompt, ctx, useTools) {
   for (let step = 0; step < MAX_STEPS && !stop(); step++) {
     const body = { model: account.model, messages: msgs };
     if (useTools) body.tools = defs.map(t => ({ type: 'function', function: t }));
-    const j = await postJson(`${base}/chat/completions`, { Authorization: `Bearer ${key}` }, body, left());
+    const j = await postRetry(`${base}/chat/completions`, { Authorization: `Bearer ${key}` }, body, left());
     const m = j.choices?.[0]?.message || {};
     if (useTools && m.tool_calls?.length) {
       m.tool_calls.forEach((tc, i) => { if (!tc.id) tc.id = `call_${step}_${i}`; });
@@ -293,6 +302,138 @@ async function delegate(ctx, args) {
   return (r.ok ? '' : 'The teammate failed: ') + (r.text || '(no reply)').slice(0, 12000);
 }
 
+// ---------------- group project mode ----------------
+// All AIs build one project together: the lead plans an equal split, everyone works on their part in
+// parallel in the shared workspace, optionally cross-reviews a teammate's part, then the lead integrates.
+const GROUP_CONCURRENCY = Math.max(1, parseInt(process.env.GROUP_CONCURRENCY) || 4);
+
+async function pool(items, limit, fn, aborted) {
+  const out = new Array(items.length); let i = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (i < items.length && !(aborted && aborted())) { const k = i++; out[k] = await fn(items[k], k); }
+  }));
+  return out;
+}
+
+function extractJson(text) {
+  const t = String(text || '').replace(/```json|```/gi, '');
+  const a = t.indexOf('{'), b = t.lastIndexOf('}');
+  if (a < 0 || b <= a) return null;
+  try { return JSON.parse(t.slice(a, b + 1)); } catch (_) { return null; }
+}
+
+function normalizePlan(raw, agents) {
+  const parts = []; const used = new Set();
+  for (const p of (raw?.parts || [])) {
+    const a = findAccount(p.agent);
+    if (!a || !agents.includes(a) || used.has(a.id)) continue;
+    used.add(a.id);
+    parts.push({ agent: a, title: String(p.title || 'Part'), description: String(p.description || ''),
+      files: Array.isArray(p.files) ? p.files.map(String) : [], share: Number(p.share) > 0 ? Number(p.share) : 0 });
+  }
+  const real = parts.length; const realSum = parts.reduce((s, p) => s + p.share, 0);
+  const allWeighted = real > 0 && parts.every(p => p.share > 0);
+  for (const a of agents) if (!used.has(a.id)) {
+    parts.push({ agent: a, title: 'Support: tests, docs and polish', files: [],
+      description: 'Help where needed: write tests and documentation, fill gaps and fix problems. Read PLAN.md and your teammates\' files first.',
+      share: allWeighted ? realSum / real : 0 });
+  }
+  const sum = parts.reduce((s, p) => s + p.share, 0);
+  if (sum <= 0 || parts.some(p => p.share <= 0)) parts.forEach(p => { p.share = 100 / parts.length; });
+  else parts.forEach(p => { p.share = p.share * 100 / sum; });
+  return { summary: String(raw?.summary || ''), notes: String(raw?.shared_notes || ''), parts };
+}
+
+function fallbackPlan(agents, request) {
+  return normalizePlan({ summary: request.slice(0, 200), shared_notes: 'No detailed plan was produced. Claim your area by reading PLAN.md and list_files before creating anything, keep folders tidy, and do not overwrite teammates\' files.',
+    parts: agents.map((a, i) => ({ agent: a.name, title: `Part ${i + 1} of ${agents.length}`, share: 100 / agents.length,
+      description: `Take the ${i + 1}${['st','nd','rd'][i] || 'th'} of ${agents.length} equal slices of this project: ${request}. Decide a sensible slice by role and by what teammates are already doing.` })) }, agents);
+}
+
+const planText = (plan) =>
+  `Plan (${plan.parts.length} AIs, 100% total)${plan.summary ? `: ${plan.summary}` : ''}\n` +
+  plan.parts.map(p => `• ${p.agent.name}, ${Math.round(p.share)}%: ${p.title}${p.files.length ? `  [${p.files.join(', ')}]` : ''}`).join('\n') +
+  (plan.notes ? `\n\nShared notes: ${plan.notes}` : '');
+
+function planMarkdown(request, plan) {
+  return `# Project plan\n\n**Request:** ${request}\n\n${plan.summary ? `**Summary:** ${plan.summary}\n\n` : ''}${plan.notes ? `## Shared conventions\n${plan.notes}\n\n` : ''}## Split of work\n` +
+    plan.parts.map(p => `### ${p.agent.name}: ${p.title} (${Math.round(p.share)}%)\n${p.description}\n${p.files.length ? `Files: ${p.files.join(', ')}\n` : ''}`).join('\n');
+}
+
+const groupSystem = (a, lead, agents) => `You are "${a.name}", one of ${agents.length} AIs building a project together with a human. "${lead.name}" is the team lead.
+${a.role ? `Your role: ${a.role}\n` : ''}${toolLine(a)}
+Everyone works at the same time in the same workspace folder. Stay inside your own part, do not overwrite or delete teammates' files (read them if you need to fit with them), and follow the agreed structure in PLAN.md. Test what you build when you can. Finish with a short report: files created or changed, status, and anything teammates must know.`;
+
+const sayPost = (ctx, msg) => { const m = { ts: Date.now(), ...msg }; state.messages.push(m); save(); ctx.send('message', { message: m }); return m; };
+const phase = (ctx, text) => sayPost(ctx, { from: 'System', text, phase: true });
+
+async function groupProject(ctx, request, { review }) {
+  const agents = state.accounts.filter(a => apiKeyOf(a) && a.model);
+  const lead = agents.find(a => a.id === state.mainId) || agents[0];
+  if (agents.length < 2) {
+    const r = await runAgent(lead || mainAccount(), mainSystem(lead || mainAccount()), `Conversation so far:\n${transcript()}\n\nReply to the human's latest message now.`, ctx);
+    return sayPost(ctx, { from: (lead || mainAccount()).name, text: r.text || '(no reply)', error: !r.ok, tools: r.tools, main: true });
+  }
+  const aborted = () => ctx.aborted && ctx.aborted();
+  const roster = agents.map(a => `- ${a.name}${a.role ? ` (${a.role})` : ''} [${a.model}]${a.noTools ? ' (no tools: text only)' : ''}`).join('\n');
+
+  // 1. Plan
+  phase(ctx, `Phase 1 of ${review ? 4 : 3}: ${lead.name} is planning the split between ${agents.length} AIs`);
+  ctx.send('thinking', { from: lead.name });
+  const pr = await runAgent({ ...lead, noTools: true },
+    'You are a project planner who splits software and writing projects between several AI workers. Reply with JSON only.',
+    `PLAN_REQUEST\nProject request from the human:\n${request}\n\nWorkers (each must get exactly one part):\n${roster}\n\n` +
+    `Split the project into ${agents.length} parts of roughly equal size (about ${Math.round(100 / agents.length)}% each), unless the roles clearly justify different weights. ` +
+    'Make parts independent so everyone can work at once, define clear file/folder ownership and any interfaces between parts (API routes, function names, data formats), and choose a simple stack.\n' +
+    'Reply with JSON only in this shape: {"summary":"one line","shared_notes":"stack, folder structure, interfaces and conventions everyone must follow","parts":[{"agent":"exact worker name","title":"short title","share":25,"description":"detailed deliverables","files":["paths owned by this worker"]}]}',
+    { ...ctx, account: lead, onTool() {} });
+  ctx.send('done', { from: lead.name });
+  const raw = pr.ok ? extractJson(pr.text) : null;
+  const plan = raw ? normalizePlan(raw, agents) : fallbackPlan(agents, request);
+  try { fs.writeFileSync(path.join(WORKSPACE, 'PLAN.md'), planMarkdown(request, plan)); } catch (_) {}
+  sayPost(ctx, { from: lead.name, text: planText(plan) + (raw ? '' : '\n\n(The plan could not be parsed, so the work was split evenly.)'), main: true });
+
+  // 2. Build in parallel
+  phase(ctx, `Phase 2 of ${review ? 4 : 3}: all ${agents.length} AIs are building their parts at the same time`);
+  const brief = `Project request from the human:\n${request}\n\nFull plan (see PLAN.md):\n${planText(plan)}`;
+  const results = await pool(plan.parts, GROUP_CONCURRENCY, async (part) => {
+    ctx.send('thinking', { from: part.agent.name });
+    const r = await runAgent(part.agent, groupSystem(part.agent, lead, agents),
+      `YOUR PART\n${brief}\n\nYour part is "${part.title}" (${Math.round(part.share)}% of the project):\n${part.description}\n${part.files.length ? `Files you own: ${part.files.join(', ')}\n` : ''}\nBuild it now with your tools, then report.`,
+      { ...ctx, account: part.agent, noDelegate: true });
+    sayPost(ctx, { from: part.agent.name, text: r.text || '(no reply)', error: !r.ok, tools: r.tools, worker: true });
+    return { part, r };
+  }, aborted);
+
+  // 3. Cross-review
+  let reviews = [];
+  if (review && !aborted()) {
+    phase(ctx, `Phase 3 of 4: each AI reviews a teammate's part and fixes problems`);
+    reviews = await pool(plan.parts, GROUP_CONCURRENCY, async (part, i) => {
+      const target = plan.parts[(i + 1) % plan.parts.length];
+      ctx.send('thinking', { from: part.agent.name });
+      const r = await runAgent(part.agent, groupSystem(part.agent, lead, agents),
+        `REVIEW TASK\n${brief}\n\nReview ${target.agent.name}'s part ("${target.title}", files: ${target.files.join(', ') || 'see PLAN.md and list_files'}). Read the files, run or test them if possible, and check they follow the plan and fit with the rest. Fix clear bugs directly with small edits; report bigger problems. Reply with a short review.`,
+        { ...ctx, account: part.agent, noDelegate: true });
+      sayPost(ctx, { from: part.agent.name, text: `Review of ${target.agent.name}'s part:\n${r.text || '(no reply)'}`, error: !r.ok, tools: r.tools, worker: true });
+      return { part, target, r };
+    }, aborted);
+  }
+
+  // 4. Lead integrates and finishes
+  if (aborted()) return;
+  phase(ctx, `Phase ${review ? 4 : 3} of ${review ? 4 : 3}: ${lead.name} is putting everything together`);
+  ctx.send('thinking', { from: lead.name });
+  const failed = results.filter(x => x && !x.r.ok).map(x => `${x.part.agent.name} (${x.part.title}): ${x.r.text}`);
+  const reports = results.filter(Boolean).map(x => `## ${x.part.agent.name}: ${x.part.title}\n${(x.r.text || '').slice(0, 2500)}`).join('\n\n');
+  const reviewTxt = reviews.filter(Boolean).map(x => `## ${x.part.agent.name} reviewed ${x.target.agent.name}\n${(x.r.text || '').slice(0, 1500)}`).join('\n\n');
+  const fin = await runAgent(lead, groupSystem(lead, lead, agents),
+    `INTEGRATION\n${brief}\n\nTeam reports:\n${reports}\n${reviewTxt ? `\nReviews:\n${reviewTxt}\n` : ''}${failed.length ? `\nThese parts FAILED and still need doing, finish them yourself:\n${failed.join('\n')}\n` : ''}\n` +
+    'Now integrate: list_files, read the key files, run the project or its tests, fix integration problems (or use delegate_task for bigger fixes), complete anything missing, and make sure a README.md explains how to run it. Then reply to the human with a concise final summary: what was built, the main files, and how to run it.',
+    { ...ctx, account: lead });
+  sayPost(ctx, { from: lead.name, text: fin.text || '(no reply)', error: !fin.ok, tools: fin.tools, main: true });
+}
+
 let busy = false;
 async function chat(req, res) {
   const body = await readBody(req);
@@ -311,10 +452,15 @@ async function chat(req, res) {
     state.messages.push(userMsg); save(); send('message', { message: userMsg });
     send('thinking', { from: main.name });
     const ctx = { account: main, send, aborted: () => aborted, onTool: (acct, t) => send('tool', { from: acct.name, tool: t }) };
-    const r = await runAgent(main, mainSystem(main), `Conversation so far:\n${transcript()}\n\nReply to the human's latest message now.`, ctx);
-    const msg = { from: main.name, text: r.text || '(no reply)', error: !r.ok, tools: r.tools, main: true, ts: Date.now() };
-    state.messages.push(msg); save(); send('message', { message: msg });
-  } finally { busy = false; send('end', {}); res.end(); }
+    if (body.mode === 'group') {
+      await groupProject(ctx, text, { review: body.review !== false });
+    } else {
+      const r = await runAgent(main, mainSystem(main), `Conversation so far:\n${transcript()}\n\nReply to the human's latest message now.`, ctx);
+      const msg = { from: main.name, text: r.text || '(no reply)', error: !r.ok, tools: r.tools, main: true, ts: Date.now() };
+      state.messages.push(msg); save(); send('message', { message: msg });
+    }
+  } catch (e) { send('message', { message: { from: 'System', text: 'Error: ' + (e.message || e), error: true } }); }
+  finally { busy = false; send('end', {}); res.end(); }
 }
 
 // ---------------- http ----------------

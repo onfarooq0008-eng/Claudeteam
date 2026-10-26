@@ -8,6 +8,15 @@ A web app where you chat with a **main AI** that can use tools (create and edit 
 3. Chat with the main AI. It works with its tools and uses `delegate_task` to send jobs to teammates, checks their reports, and tells you the result. Teammate reports and every tool call show in the chat.
 4. The **Files** panel is the shared workspace: open, edit, save, download, create and delete files. Agents and you see the same files.
 
+## Group project mode
+Switch the box above the message field from **Direct chat** to **Group project** and describe a project. Every AI with an API key joins:
+1. **Plan:** the lead (main AI) splits the project into one part per AI, equal shares by default (4 AIs = 25% each), with file ownership and shared conventions. The plan is saved as `PLAN.md` in the workspace.
+2. **Build:** all AIs work on their parts at the same time in the shared workspace, each with the full toolset.
+3. **Cross-review** (optional checkbox): each AI reviews a teammate's part, runs it and fixes clear bugs.
+4. **Integrate:** the lead puts it together, finishes any part that failed, runs it, writes the README and gives you a summary.
+
+Rate limits (HTTP 429) and temporary provider errors are retried automatically. Up to 4 AIs run at once (`GROUP_CONCURRENCY`); lower it on free tiers with strict limits. A group run uses many API calls, so expect it to cost more than a direct chat.
+
 ## What agents can do
 `list_files`, `read_file`, `write_file`, `append_file`, `replace_in_file`, `move_file`, `delete_file`, `fetch_url`, `run_command` (shell), and for the main AI `delegate_task`. File tools cannot leave the workspace folder.
 
@@ -46,7 +55,7 @@ docker run -p 8000:8000 -e APP_PASSWORD=secret -v team-agent-data:/app/data team
 ```
 
 ## Environment variables
-`APP_PASSWORD`, `PORT`, `HOST`, `DATA_DIR`, `WORKSPACE`, `ALLOW_SHELL` (`0` disables shell), `ACCOUNTS_JSON`
+`APP_PASSWORD`, `PORT`, `HOST`, `DATA_DIR`, `WORKSPACE`, `ALLOW_SHELL` (`0` disables shell), `GROUP_CONCURRENCY` (default 4), `ACCOUNTS_JSON`
 
 ## Security notes
 - Keys entered in the UI are saved in `data/state.json` (owner-only permissions) and never sent back to the browser. Prefer env-var keys on shared hosts.
