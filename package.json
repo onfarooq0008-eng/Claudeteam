@@ -1,0 +1,7 @@
+{
+  "name": "claude-team-webui",
+  "version": "1.0.0",
+  "description": "Web UI where several Claude accounts (official Claude Code login) work together in one group chat",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" }
+}

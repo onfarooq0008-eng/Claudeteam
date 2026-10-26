@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Team</title>
+<style>
+  :root { --bg:#faf9f5; --panel:#fff; --ink:#1f1e1d; --mute:#73726c; --line:#e6e3da; --accent:#c96442; --accent-ink:#fff; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#262624; --panel:#30302e; --ink:#f0eee6; --mute:#a3a198; --line:#41403d; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif; background:var(--bg); color:var(--ink); height:100dvh; display:flex; flex-direction:column; }
+  header { display:flex; align-items:center; gap:8px; padding:10px 14px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header h1 { font-size:16px; margin:0; flex:1; }
+  button { font:inherit; border:1px solid var(--line); background:var(--panel); color:var(--ink); border-radius:8px; padding:6px 12px; cursor:pointer; }
+  button.primary { background:var(--accent); color:var(--accent-ink); border-color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  main { flex:1; display:flex; min-height:0; }
+  aside { width:300px; border-right:1px solid var(--line); background:var(--panel); overflow:auto; padding:12px; display:none; }
+  aside.open { display:block; }
+  @media (max-width:760px){ aside.open { position:fixed; inset:49px 0 0 0; width:auto; z-index:5; } }
+  section.chat { flex:1; display:flex; flex-direction:column; min-width:0; }
+  #log { flex:1; overflow:auto; padding:14px; display:flex; flex-direction:column; gap:12px; }
+  .msg { max-width:760px; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:10px 12px; white-space:pre-wrap; word-break:break-word; }
+  .msg.you { align-self:flex-end; background:var(--accent); color:var(--accent-ink); border-color:var(--accent); }
+  .msg.err { border-color:#c0392b; }
+  .who { font-size:12px; font-weight:600; color:var(--mute); margin-bottom:2px; }
+  .you .who { color:#fff; opacity:.85; }
+  .think { color:var(--mute); font-style:italic; }
+  form.send { display:flex; gap:8px; padding:10px; border-top:1px solid var(--line); background:var(--panel); align-items:flex-end; }
+  textarea, input, select { font:inherit; color:var(--ink); background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:8px; width:100%; }
+  textarea { resize:none; max-height:160px; }
+  .acct { border:1px solid var(--line); border-radius:10px; padding:10px; margin-bottom:10px; }
+  .acct b { display:block; } .acct small { color:var(--mute); display:block; margin:2px 0 6px; }
+  .acct code { display:block; background:var(--bg); padding:6px; border-radius:6px; font-size:12px; word-break:break-all; user-select:all; margin:6px 0; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; }
+  .stack { display:flex; flex-direction:column; gap:6px; } .stack[hidden] { display:none; }
+  .tag { display:inline-block; font-size:11px; border:1px solid var(--line); border-radius:6px; padding:0 6px; margin-left:6px; color:var(--mute); font-weight:400; }
+  h3 { margin:14px 0 6px; font-size:13px; color:var(--mute); text-transform:uppercase; letter-spacing:.04em; }
+  .file { cursor:pointer; padding:3px 0; font-size:13px; color:var(--accent); word-break:break-all; }
+  dialog { border:1px solid var(--line); border-radius:12px; background:var(--panel); color:var(--ink); max-width:min(720px,92vw); width:100%; }
+  dialog pre { white-space:pre-wrap; word-break:break-word; max-height:60vh; overflow:auto; font-size:13px; }
+  #login { margin:auto; width:min(340px,90vw); display:flex; flex-direction:column; gap:10px; }
+</style>
+</head>
+<body>
+<div id="login" hidden>
+  <h2>Claude Team</h2>
+  <input id="pw" type="password" placeholder="App password" autocomplete="current-password">
+  <button class="primary" id="pwBtn">Sign in</button>
+  <small id="pwErr" style="color:#c0392b"></small>
+</div>
+
+<div id="app" style="display:none;flex-direction:column;flex:1;min-height:0">
+  <header>
+    <button id="menu">☰ Team</button>
+    <h1>Claude Team</h1>
+    <select id="rounds" style="width:auto" title="How many times each account speaks per message">
+      <option value="1">1 round</option><option value="2">2 rounds</option><option value="3">3 rounds</option><option value="5">5 rounds</option>
+    </select>
+    <button id="reset">Clear</button>
+  </header>
+  <main>
+    <aside id="side">
+      <h3>Accounts</h3>
+      <div id="accts"></div>
+      <h3>Add account</h3>
+      <div class="stack">
+        <select id="aType">
+          <option value="claude">Claude Code (account login / token)</option>
+          <option value="openai">Custom API (OpenAI-compatible)</option>
+          <option value="anthropic">Anthropic API key</option>
+        </select>
+        <input id="aName" placeholder="Name (e.g. Architect, nvidia 1)">
+        <textarea id="aRole" rows="2" placeholder="Role (optional, e.g. plans the work and reviews code)"></textarea>
+        <div id="fClaude" class="stack">
+          <input id="aTok" type="password" placeholder="Claude token (from `claude setup-token`) — optional" autocomplete="off">
+        </div>
+        <div id="fApi" class="stack" hidden>
+          <select id="aPreset"></select>
+          <input id="aUrl" placeholder="Base URL">
+          <input id="aModel" placeholder="Model name (e.g. gpt-4o-mini)">
+          <input id="aKey" type="password" placeholder="API key" autocomplete="off">
+          <input id="aKeyEnv" placeholder="…or env var name holding the key (e.g. OPENROUTER_KEY)">
+        </div>
+        <button class="primary" id="aAdd">Add</button>
+      </div>
+      <h3>Shared workspace</h3>
+      <div id="wsPath" style="font-size:12px;color:var(--mute);word-break:break-all"></div>
+      <div id="files"></div>
+      <button id="refreshFiles" style="margin-top:6px">Refresh files</button>
+    </aside>
+    <section class="chat">
+      <div id="log"></div>
+      <form class="send" id="form">
+        <textarea id="text" rows="1" placeholder="Give the team a task…"></textarea>
+        <button class="primary" id="sendBtn">Send</button>
+      </form>
+    </section>
+  </main>
+</div>
+
+<dialog id="dlg"><b id="dlgTitle"></b><pre id="dlgBody"></pre><button onclick="dlg.close()">Close</button></dialog>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let st = { accounts: [], messages: [] };
+
+async function api(url, opts = {}) {
+  const r = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  if (r.status === 401) { showLogin(); throw new Error('login'); }
+  return r;
+}
+function showLogin() { $('login').hidden = false; $('login').style.display = 'flex'; $('app').style.display = 'none'; }
+$('pwBtn').onclick = async () => {
+  const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: $('pw').value }) });
+  if (r.ok) start(); else $('pwErr').textContent = 'Wrong password';
+};
+$('pw').addEventListener('keydown', e => { if (e.key === 'Enter') $('pwBtn').click(); });
+
+function addMsg(m) {
+  const d = document.createElement('div');
+  d.className = 'msg' + (m.from === 'You' ? ' you' : '') + (m.error ? ' err' : '');
+  const w = document.createElement('div'); w.className = 'who'; w.textContent = m.from;
+  const t = document.createElement('div'); t.textContent = m.text;
+  d.append(w, t); $('log').append(d); $('log').scrollTop = 1e9; return d;
+}
+
+function renderAccounts() {
+  $('accts').innerHTML = '';
+  if (!st.accounts.length) $('accts').innerHTML = '<small style="color:var(--mute)">No accounts yet. Add one below.</small>';
+  for (const a of st.accounts) {
+    const d = document.createElement('div'); d.className = 'acct';
+    d.innerHTML = '<b><span></span><span class="tag"></span></b><small></small><div data-h></div><code></code><div class="row"><button data-c>Test connection</button><button data-d>Remove</button></div><small data-s></small>';
+    d.querySelector('b span').textContent = a.name;
+    d.querySelector('.tag').textContent = a.type === 'claude' ? 'Claude Code' : a.type === 'anthropic' ? 'Anthropic API' : 'API';
+    d.querySelector('small').textContent = a.role || 'No role set';
+    const code = d.querySelector('code'), hint = d.querySelector('[data-h]');
+    if (a.type === 'claude') {
+      if (a.hasKey) { hint.textContent = 'Signed in with a saved token.'; code.remove(); }
+      else { hint.textContent = 'Sign in once on the server with the official login:'; code.textContent = `CLAUDE_CONFIG_DIR="${a.dir}" ${st.claudeBin} auth login`; }
+    } else {
+      hint.textContent = `${a.model} · ${a.baseUrl || (a.type === 'anthropic' ? 'api.anthropic.com' : 'api.openai.com/v1')}` + (a.hasKey ? '' : ' · no key set');
+      code.remove();
+    }
+    d.querySelector('[data-c]').onclick = async (e) => {
+      e.target.disabled = true; const s = d.querySelector('[data-s]'); s.textContent = 'Checking…';
+      const r = await (await api(`/api/accounts/${a.id}/check`, { method: 'POST' })).json();
+      s.textContent = r.signedIn ? '✓ Connected' : '✗ ' + r.detail; e.target.disabled = false;
+    };
+    d.querySelector('[data-d]').onclick = async () => {
+      if (!confirm(`Remove ${a.name} and its saved login?`)) return;
+      await api(`/api/accounts/${a.id}`, { method: 'DELETE' }); load();
+    };
+    $('accts').append(d);
+  }
+}
+
+async function loadFiles() {
+  const { files } = await (await api('/api/files')).json();
+  $('files').innerHTML = '';
+  if (!files.length) $('files').innerHTML = '<small style="color:var(--mute)">Empty</small>';
+  for (const f of files) {
+    const d = document.createElement('div'); d.className = 'file'; d.textContent = f;
+    d.onclick = async () => { $('dlgTitle').textContent = f; $('dlgBody').textContent = await (await api('/api/file?path=' + encodeURIComponent(f))).text(); $('dlg').showModal(); };
+    $('files').append(d);
+  }
+}
+
+async function load() {
+  st = await (await api('/api/state')).json();
+  $('wsPath').textContent = st.workspace;
+  renderAccounts();
+  $('log').innerHTML = ''; st.messages.forEach(addMsg);
+  loadFiles();
+}
+
+$('menu').onclick = () => $('side').classList.toggle('open');
+$('refreshFiles').onclick = loadFiles;
+const PRESETS = [
+  ['Custom (enter URL)', ''],
+  ['OpenAI', 'https://api.openai.com/v1'],
+  ['OpenRouter', 'https://openrouter.ai/api/v1'],
+  ['NVIDIA NIM', 'https://integrate.api.nvidia.com/v1'],
+  ['Groq', 'https://api.groq.com/openai/v1'],
+  ['Together AI', 'https://api.together.xyz/v1'],
+  ['DeepSeek', 'https://api.deepseek.com/v1'],
+  ['Mistral', 'https://api.mistral.ai/v1'],
+  ['Google Gemini', 'https://generativelanguage.googleapis.com/v1beta/openai'],
+  ['Ollama (local)', 'http://localhost:11434/v1'],
+];
+PRESETS.forEach(([n, u]) => { const o = document.createElement('option'); o.textContent = n; o.value = u; $('aPreset').append(o); });
+$('aPreset').onchange = () => { $('aUrl').value = $('aPreset').value; };
+function syncType() {
+  const t = $('aType').value;
+  $('fClaude').hidden = t !== 'claude'; $('fApi').hidden = t === 'claude';
+  $('aPreset').hidden = t === 'anthropic';
+  if (t === 'anthropic') $('aUrl').placeholder = 'Base URL (optional, default api.anthropic.com)';
+  else $('aUrl').placeholder = 'Base URL';
+}
+$('aType').onchange = syncType; syncType();
+$('aAdd').onclick = async () => {
+  const name = $('aName').value.trim(); if (!name) return;
+  const type = $('aType').value;
+  const body = { name, type, role: $('aRole').value };
+  if (type === 'claude') body.oauthToken = $('aTok').value;
+  else Object.assign(body, { baseUrl: $('aUrl').value, model: $('aModel').value, apiKey: $('aKey').value, keyEnv: $('aKeyEnv').value });
+  const r = await api('/api/accounts', { method: 'POST', body: JSON.stringify(body) });
+  if (!r.ok) { alert((await r.json()).error); return; }
+  ['aName', 'aRole', 'aTok', 'aUrl', 'aModel', 'aKey', 'aKeyEnv'].forEach(i => $(i).value = ''); $('aPreset').selectedIndex = 0;
+  load();
+};
+$('reset').onclick = async () => { if (confirm('Clear the conversation?')) { await api('/api/reset', { method: 'POST' }); load(); } };
+
+const ta = $('text');
+ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; });
+ta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && window.innerWidth > 760) { e.preventDefault(); $('form').requestSubmit(); } });
+
+$('form').onsubmit = async (e) => {
+  e.preventDefault();
+  const text = ta.value.trim(); if (!text) return;
+  ta.value = ''; ta.style.height = 'auto'; $('sendBtn').disabled = true;
+  let thinking = null;
+  try {
+    const r = await api('/api/chat', { method: 'POST', body: JSON.stringify({ text, rounds: $('rounds').value }) });
+    if (!r.ok) { addMsg({ from: 'System', text: (await r.json()).error, error: true }); return; }
+    const reader = r.body.getReader(), dec = new TextDecoder(); let buf = '';
+    for (;;) {
+      const { done, value } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i; while ((i = buf.indexOf('\n\n')) >= 0) {
+        const ev = JSON.parse(buf.slice(6, i)); buf = buf.slice(i + 2);
+        if (thinking) { thinking.remove(); thinking = null; }
+        if (ev.type === 'message') addMsg(ev.message);
+        if (ev.type === 'thinking') { thinking = addMsg({ from: ev.from, text: 'working…' }); thinking.querySelector('div:last-child').classList.add('think'); }
+      }
+    }
+  } catch (_) {} finally { if (thinking) thinking.remove(); $('sendBtn').disabled = false; loadFiles(); }
+};
+
+async function start() {
+  $('login').style.display = 'none'; $('app').style.display = 'flex';
+  try { await load(); if (!st.accounts.length) $('side').classList.add('open'); } catch (_) {}
+}
+fetch('/api/state').then(r => r.status === 401 ? showLogin() : start());
+</script>
+</body>
+</html>
